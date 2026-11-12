@@ -1,0 +1,9 @@
+node_modules
+tmp/
+.work/
+.dsh-ops/
+data/
+nul
+*.bak
+.bak/
+*~

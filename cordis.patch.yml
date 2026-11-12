@@ -1,0 +1,42 @@
+# @zjjlivingfree/dsh-session-escalation bundle patch
+#
+# scoped 包名在 YAML 里必须带引号，否则 `@` 开头会被解析成非法标量。
+- insert:
+    - id: session-escalation
+      name: '@zjjlivingfree/dsh-session-escalation'
+#
+# 配置的首选入口是 GUI：DSH 插件管理页 → 本插件那一行的「配置」页，
+# 表单由 lib/client.js 注册到 plugins.row.config 槽位渲染，读写走宿主 configForms。
+# 阈值/额度/开关都是 schemastery `.volatile()` 字段，保存后热更新，**不需要重载插件**。
+#
+# 下方 YAML 只是同一批配置的文件级等价写法（无 GUI 的 profile、或想固化进 profile 时用）。
+# 优先级：宿主 config（本文件 / GUI 写入）逐键 > DSH_ESCALATION_CONFIG > lib/policy.js 的 DEFAULTS。
+#
+# 完整键与默认值见 lib/policy.js 的 DEFAULTS：
+#   enabled: true
+#   thresholdRatio1: 0.70          # L1：达到此占用比 → 自动压缩
+#   thresholdRatio2: 0.90          # L2：达到此占用比 → 升级到同级新会话
+#   maxCompactPerSession: 2        # 每会话压缩额度
+#   maxEscalatePerSession: 1       # 每会话升级额度
+#   maxChainDepth: 16              # 分支链最大深度
+#   autoContinue: true             # 升级后自动向分支投递续作消息
+#   continuePrompt: '...'          # 续作消息正文
+#   renameOnEscalate: true         # 升级后给分支会话改名
+#   nameTemplate: '{parent}-续{n}' # 命名模板
+#
+# ⚠ patch 是**整体替换**该 entry 的 config，不是深合并——写了 config 就要把想保留的键全部写全，
+#   漏写的键会退回默认值。
+#
+# 例：改成 60%/85%、自定义前缀命名、每会话压 3 次
+#
+# - id: session-escalation
+#   config:
+#     enabled: true
+#     thresholdRatio1: 0.6
+#     thresholdRatio2: 0.85
+#     maxCompactPerSession: 3
+#     maxEscalatePerSession: 1
+#     maxChainDepth: 16
+#     autoContinue: true
+#     renameOnEscalate: true
+#     nameTemplate: '[{date}] {parent} 第{n}棒'
