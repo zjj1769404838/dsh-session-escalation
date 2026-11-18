@@ -13,6 +13,8 @@ const cases = [
   { name: 'stopActivity 参数漂移', file: 'lib/index.js', from: 'stopActivity: true', to: 'stopActivity: false', gate: 'test-flow.mjs', expectFail: '归档: 默认开启' },
   { name: '开关失效（守卫移除）', file: 'lib/index.js', from: 'if (cfg.archiveParentOnEscalate) await archiveParent(session)', to: 'await archiveParent(session)', gate: 'test-flow.mjs', expectFail: '归档: archiveParentOnEscalate=false' },
   { name: 'client 注册 key 漂移', file: 'lib/client.js', from: 'key: `@zjjlivingfree/dsh-session-escalation#${ROW_ID}`', to: 'key: ROW_ID', gate: 'test-loader.mjs', expectFail: '注册 key' },
+  { name: 'v0.5 summary 漏传 seed 守卫移除', file: 'lib/index.js', from: '...(summary ? {} : { seed, inheritedEventCount: boundary + 1 })', to: 'seed, inheritedEventCount: boundary + 1', gate: 'test-flow.mjs', expectFail: 'v0.5 summary: L2 升级不传 seed' },
+  { name: 'v0.5 completed-only 守卫移除', file: 'lib/index.js', from: "if (reasonKind !== undefined && reasonKind !== 'completed') return", to: '', gate: 'test-flow.mjs', expectFail: 'v0.5 仅 completed turn 评估: reason=error 跳过' },
 ]
 let bad = 0
 const gates = new Set()

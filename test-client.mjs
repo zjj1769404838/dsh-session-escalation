@@ -124,7 +124,7 @@ check('client: package.json 声明 client 半边（inject + platform + exports�
   assert.deepEqual(pkg.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-plugin-manager', '@deepseek-ai/dsh-client-ui-renderer'])
   assert.equal(pkg.dsh.client.platform, 'web')
   assert.equal(pkg.exports['./client'], './lib/client.js')
-  assert.equal(pkg.version, '0.4.1')
+  assert.equal(pkg.version, '0.5.0')
 })
 
 check('client: summary 视图渲染纯文本摘要', () => {
@@ -158,19 +158,20 @@ const readyValue = {
   maxCompactPerSession: 2,
   maxEscalatePerSession: 1,
   maxChainDepth: 16,
+  inheritMode: 'summary',
   autoContinue: true,
   renameOnEscalate: true,
   nameTemplate: '{parent}-续{n}',
   continuePrompt: '继续',
 }
 
-check('client: form 就绪时渲染 11 行字段 + 保存/还原 + revision 提示', () => {
+check('client: form 就绪时渲染 12 行字段 + 保存/还原 + revision 提示', () => {
   const form = { state: { status: 'ready', writable: true, revision: 7, value: readyValue }, mutate: async () => true }
   const out = render(component({ view: 'page', form }))
   assert.equal(out.$$el, 'form')
   const nodes = flatten(out)
   const gridRows = nodes.filter((node) => node.props?.style?.gridTemplateColumns)
-  assert.equal(gridRows.length, 11, `期望 11 行字段，实得 ${gridRows.length}`)
+  assert.equal(gridRows.length, 12, `期望 12 行字段，实得 ${gridRows.length}`)
   const text = JSON.stringify(out)
   assert.match(text, /阈值与额度改动保存后立即生效/)
   assert.match(text, /revision=7/)
@@ -178,14 +179,14 @@ check('client: form 就绪时渲染 11 行字段 + 保存/还原 + revision 提�
   assert.ok(buttons.length >= 12, `期望每行「默认」按钮 + 保存/还原，实得 ${buttons.length}`)
 })
 
-check('client: 11 个字段各自渲染成对应控件类型', () => {
+check('client: 12 个字段各自渲染成对应控件类型', () => {
   const form = { state: { status: 'ready', writable: true, revision: 3, value: readyValue }, mutate: async () => true }
   const nodes = flatten(render(component({ view: 'page', form })))
   const inputs = nodes.filter((node) => node.$$el === 'input')
   const byType = (type) => inputs.filter((node) => node.props.type === type)
   assert.equal(byType('checkbox').length, 4, '布尔字段应有 4 个 checkbox')
   assert.equal(byType('number').length, 5, 'ratio+count 应有 5 个 number')
-  assert.equal(byType('text').length, 2, '文本字段应有 2 个 text')
+  assert.equal(byType('text').length, 3, '文本字段应有 3 个 text（含 inheritMode）')
 })
 
 check('client: writable=false 时禁用保存', () => {

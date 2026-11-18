@@ -86,8 +86,8 @@ test('L1: ratio=0.75 → compactNow 一次，不 create', async () => {
   assert.equal(h.calls.compactNow.length, 2)
 })
 
-test('L2: ratio=0.95 → 直接升级，seed 配方对齐 controller', async () => {
-  const h = makeHarness({ view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 } })
+test('L2: ratio=0.95 → 直接升级，seed 配方对齐 controller（full 模式）', async () => {
+  const h = makeHarness({ view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 }, config: { inheritMode: 'full' } })
   h.ctx.__listener[1](h.session, { type: 'turn/end', data: { turn: 0 } })
   await tick(); await tick()
   assert.equal(h.calls.compactNow.length, 0, 'L2 不先压缩')
@@ -108,6 +108,76 @@ test('L2: ratio=0.95 → 直接升级，seed 配方对齐 controller', async () 
   assert.equal(opts.meta.parentSession, undefined, '同级：meta 不设 parentSession')
   assert.equal(opts.parentAgent, undefined, '同级：不建立子所有权')
   assert.deepEqual(opts.agentOptions, { provider: 'p', model: 'm' })
+})
+
+// ---- v0.5 summary 模式（默认）：干净新会话 + 交接消息，不克隆历史 ----
+test('v0.5 summary: L2 升级不传 seed/inheritedEventCount/isSeeded（干净新会话）', async () => {
+  const h = makeHarness({ view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 } })
+  h.ctx.__listener[1](h.session, { type: 'turn/end', data: { turn: 0 } })
+  await tick(); await tick()
+  assert.equal(h.calls.create.length, 1)
+  const opts = h.calls.create[0]
+  assert.equal(opts.seed, undefined, 'summary 模式不得携带 seed')
+  assert.equal(opts.inheritedEventCount, undefined, 'summary 模式不得声明继承前缀')
+  assert.equal(opts.meta.isSeeded, undefined, 'summary 模式 meta 不写 isSeeded')
+  assert.equal(opts.meta.cwd, 'D:\\ws', 'cwd 仍继承（工作目录属于任务上下文）')
+  assert.equal(opts.meta.parentSession, undefined)
+  assert.equal(opts.parentAgent, undefined)
+})
+
+test('v0.5 summary: 交接消息含 [交接] 头 + 父标题 + 父 id，boundarySeq=null', async () => {
+  const followed = []
+  const h = makeHarness({
+    view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 },
+    extraSvc: { sessionTitle: { get: () => ({ title: '悬浮球笔记' }) } },
+  })
+  h.ctx.agents.create = async (opts) => { h.calls.create.push(opts); return { agent: { id: opts.sessionId, followup: (m) => followed.push(m) } } }
+  h.ctx.__listener[1](h.session, { type: 'turn/end', data: {} })
+  await tick(); await tick(); await tick()
+  assert.equal(followed.length, 1)
+  const msg = followed[0]
+  const text = msg.content[0].text
+  assert.match(text, /^\[交接\]/, '正文以交接头开始')
+  assert.match(text, /悬浮球笔记/, '交接头含父标题')
+  assert.match(text, /session-s1/, '交接头含父 id')
+  assert.match(text, /第 1 次升级接棒会话/)
+  assert.ok(text.includes('上一会话已因上下文占用达到升级阈值'), '正文尾部拼接 continuePrompt')
+  assert.equal(msg.source.boundarySeq, null, 'summary 无继承边界')
+})
+
+test('v0.5 full 体积门禁: seed 估算 ≥ L2 阈值 → 拒绝建立、消耗额度、warn 留痕', async () => {
+  // contextWindow=10000 → L2 预算 = 9000 tokens ≈ 36000 bytes；灌大 payload 使 seed 超阈
+  const h = makeHarness({
+    view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 },
+    config: { inheritMode: 'full' },
+  })
+  for (const e of h.events) e.data.bloat = 'x'.repeat(4000)
+  h.ctx.__listener[1](h.session, { type: 'turn/end', data: {} })
+  await tick(); await tick(); await tick()
+  assert.equal(h.calls.create.length, 0, '体积门禁必须拦下整段克隆')
+  assert.ok(h.logs.some(([l, m]) => l === 'warn' && m.includes('体积门禁拒绝')), 'warn 留痕')
+  // 额度已消耗：再来一个 turn 不重复尝试（防逐轮刷屏）
+  h.ctx.__listener[1](h.session, { type: 'turn/end', data: { turn: 1 } })
+  await tick(); await tick()
+  assert.equal(h.calls.create.length, 0, '升级额度已消耗，不再重试')
+})
+
+test('v0.5 仅 completed turn 评估: reason=error 跳过', async () => {
+  const h = makeHarness({ view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 } })
+  h.ctx.__listener[1](h.session, { type: 'turn/end', data: { reason: { kind: 'error', error: { message: 'boom' } } } })
+  await tick(); await tick()
+  assert.equal(h.calls.create.length, 0)
+  assert.equal(h.calls.compactNow.length, 0)
+})
+
+test('v0.5 仅 completed turn 评估: reason=aborted 跳过；completed 正常评估', async () => {
+  const h = makeHarness({ view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 } })
+  h.ctx.__listener[1](h.session, { type: 'turn/end', data: { reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+  await tick(); await tick()
+  assert.equal(h.calls.create.length, 0, 'aborted 不触发')
+  h.ctx.__listener[1](h.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await tick(); await tick()
+  assert.equal(h.calls.create.length, 1, 'completed 正常升级')
 })
 
 test('升级后不再评估（让位分支）', async () => {
@@ -197,7 +267,7 @@ test('autoContinue=false（显式关闭）不投递续作消息', async () => {
 })
 
 test('autoContinue=true 投递续作消息（user role + text 内容 + escalation source）', async () => {
-  process.env.DSH_ESCALATION_CONFIG = JSON.stringify({ autoContinue: true })
+  process.env.DSH_ESCALATION_CONFIG = JSON.stringify({ autoContinue: true, inheritMode: 'full' })
   const h = makeHarness({ view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 } })
   delete process.env.DSH_ESCALATION_CONFIG
   const followed = []
@@ -217,7 +287,7 @@ test('autoContinue=true 投递续作消息（user role + text 内容 + escalatio
 })
 
 test('续作投递抛错不影响升级成功（分支已建好）', async () => {
-  process.env.DSH_ESCALATION_CONFIG = JSON.stringify({ autoContinue: true })
+  process.env.DSH_ESCALATION_CONFIG = JSON.stringify({ autoContinue: true, inheritMode: 'full' })
   const h = makeHarness({ view: { contextWindow: 10000, pressureTokens: 9500, projectedTokens: 9500 } })
   delete process.env.DSH_ESCALATION_CONFIG
   h.ctx.agents.create = async (opts) => { h.calls.create.push(opts); return { agent: { id: opts.sessionId, followup: () => { throw new Error('boom') } } } }
@@ -236,7 +306,7 @@ test('Config schema: 真 schemastery + 语义层，合法输入同步返回 {val
   assert.equal(typeof Config.toJSON, 'function', 'dsh-settings 要求 Config.toJSON 存在')
   assert.equal(std.vendor, 'schemastery', 'loader isSchemastery 判据是 vendor 字符串')
   assert.equal(Config.type, 'object')
-  assert.equal(Object.keys(Config.dict).length, 11, '11 个字段全部进 schema')
+  assert.equal(Object.keys(Config.dict).length, 12, '12 个字段全部进 schema')
   const r = std.validate({ thresholdRatio1: 0.5, nameTemplate: '{parent}#{n}' })
   assert.equal(r instanceof Promise, false, 'cordis 拒绝异步校验（TypeError）')
   assert.equal(r.issues, undefined)
@@ -270,7 +340,7 @@ test('Config schema: 类型/区间由真 schema 拦，跨字段与模板由语�
   const d = v(undefined)
   assert.equal(d.issues, undefined)
   assert.deepEqual(Object.keys(d.value).sort(), [
-    'archiveParentOnEscalate', 'autoContinue', 'continuePrompt', 'enabled', 'maxChainDepth', 'maxCompactPerSession',
+    'archiveParentOnEscalate', 'autoContinue', 'continuePrompt', 'enabled', 'inheritMode', 'maxChainDepth', 'maxCompactPerSession',
     'maxEscalatePerSession', 'nameTemplate', 'renameOnEscalate', 'thresholdRatio1', 'thresholdRatio2',
   ])
 })
@@ -444,7 +514,7 @@ test('归档: archiveParentOnEscalate=false → 不调用 archiveSession', async
 test('面板显示配置来源、命名模板与 sessionTitle 就绪度', async () => {
   const h = makeHarness({ config: { thresholdRatio1: 0.5 }, extraSvc: { sessionTitle: { rename: () => ({}) } } })
   const out = h.ctx.__cmd.handler({ agent: { session: h.session } })
-  assert.match(out.text, /v0\.4\.1/)
+  assert.match(out.text, /v0\.5\.0/)
   assert.match(out.text, /配置来源: host/)
   assert.match(out.text, /配置面: 插件管理页可编辑/)
   assert.match(out.text, /\{parent\}-续\{n\}/)

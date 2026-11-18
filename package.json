@@ -1,7 +1,7 @@
 {
   "name": "@zjjlivingfree/dsh-session-escalation",
-  "version": "0.4.1",
-  "description": "DSH 两级阈值会话治理：占用达到 L1 自动压缩（ctx.compaction.compactNow）；达到 L2（或压缩额度耗尽仍高于 L1）自动 fork 同级新会话继承完整历史继续任务（ctx.agents.create + completed-turn 前缀 seed）。阈值/额度/开关声明为 schemastery volatile 字段，可在插件管理页表单里直接编辑并热更新；新会话标题按 nameTemplate 模板渲染后经 ctx.sessionTitle.rename 落地。度量取 token-meter contextPressure 投影 projectedTokens/contextWindow。纯策略内核有独立门禁；宿主集成层能力探测、fail-closed。",
+  "version": "0.5.0",
+  "description": "DSH 两级阈值会话治理：占用达到 L1 自动压缩（ctx.compaction.compactNow）；达到 L2（或压缩额度耗尽仍高于 L1）自动升级——默认（inheritMode=summary）新建干净同级会话并投递交接消息（[交接] 头 + continuePrompt），不再整段克隆历史（v0.5，连环升级根因修复）；full 模式保留 v0.4 整段继承并带体积门禁。仅 completed turn 触发评估。阈值/额度/开关声明为 schemastery volatile 字段，可在插件管理页表单里直接编辑并热更新；新会话标题按 nameTemplate 模板渲染后经 ctx.sessionTitle.rename 落地。度量取 token-meter contextPressure 投影 projectedTokens/contextWindow。纯策略内核有独立门禁；宿主集成层能力探测、fail-closed。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

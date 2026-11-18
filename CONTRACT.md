@@ -81,20 +81,37 @@
 - 服务缺席可能：`@deepseek-ai/dsh-experimental-session-titles-bundle` 列在 profile bundles，但包体在 asar 内、bundle 目录无 patch 文件 → **运行时靠 `ctx.get('sessionTitle')` 探测，绝不写进 `inject`**（否则宿主未挂时 fiber failed，v0.1 已踩过同类坑）。
 - 未声明 inject 时读服务的正道：`ctx.get(name, strict=true)`（cordis.js:1347-1356），`strict` 要求 fiber 处于 active 才返回值；直接属性访问 `ctx.commands` 在未声明时**硬抛** `cannot get property "commands" without inject`。
 
+### A12. v0.5 继承模式：干净新会话 + 交接消息 —— 连环升级根因修复，已实证
+- **事故根因（2026-11-18，session-cc3272b4 磁盘取证）**：v0.4 的 escalate 用 `events.slice(0, boundary+1)` 整段克隆父历史 → 子会话出生即继承全部体积（该会话 5060/5239 事件为继承、解压 11.84MB ≈ 285 万 token、占用比 ≈285% ≥ L2）→ 第一个 turn/end 再触发升级 → 76 分钟连环 7 次、quick-notes 工作区堆出 9 个 seeded 兄弟会话。放大器：①`turn/end` 不分 reason（error/aborted 也评估，trae 通道 39 次 TRANSPORT 重试直接产升级）；②bili gate 下 `ctx.compaction` 缺席 → L1 恒"额度耗尽"直落升级路径。
+- **宿主契约（app.asar 字节实读）**：`CreateAgentOptions.seed?/inheritedEventCount?` 均为可选（dsh-session 类型声明 "Exact fork-inherited prefix length when the session metadata sets `isSeeded`"）→ **不传 seed 且 meta 不写 isSeeded = 普通新会话**，与 GUI 新建同路径。
+- **summary 模式（默认）**：`agents.create({sessionId, meta:{cwd?, agentPreset?}, agentOptions?, setup?})`，无 seed/inheritedEventCount/isSeeded；autoContinue 投递的交接消息正文 = `[交接] 你是第 n 次升级接棒会话。父会话：「标题」(父id)，交接时间 …。父会话历史未随本会话继承，细节可回查父会话（session <id>）。` + `continuePrompt`；`source.boundarySeq=null`。
+- **full 模式（旧行为兜底档）**：保留 seed 配方，但建前估算 seed 体积（Σ JSON.stringify(event).length+1，tokens≈bytes/4）；估算 ≥ T2×contextWindow → 拒绝建立、**消耗升级额度**（防逐轮重试刷屏）、warn 留痕。
+- **门禁**：summary 无 seed 断言、交接头内容断言、体积门禁拒绝+额度消耗、error/aborted turn 跳过（`tools/mutate-archive.mjs` 对 summary 守卫与 completed-only 守卫各有一路定向变异，真红+还原）。
+
 ## 设计（两级阈值状态机）
 
 ```
 occupancy = projectedTokens（token-meter contextPressure 投影）
 ratio = occupancy / contextWindow
-每 turn/end 后异步评估（非 subagent、agent 空闲）：
+每 turn/end 后异步评估（非 subagent、agent 空闲；v0.5：仅 reason.kind==='completed'，
+  error/aborted 一律跳过 —— 2026-11-18 连环升级事故的放大器之一）：
   ratio ≥ T2 (0.90) 或 (压缩额度耗尽且 ratio ≥ T1) → escalate：
-      boundary = 最后一个 turn/end 的 seq → seed = 前缀 + end-seed 哨兵
-      ctx.agents.create({sessionId: session-<uuid>, seed, inheritedEventCount: boundary+1,
-                         meta:{cwd, isSeeded:true, agentPreset?}, agentOptions, setup})
+    inheritMode='summary'（v0.5 默认）：
+      ctx.agents.create({sessionId: session-<uuid>, meta:{cwd, agentPreset?}, agentOptions, setup})
+        —— 干净新会话：不传 seed / inheritedEventCount / isSeeded
       workspace.attachSession(childId)（尽力）
       renameOnEscalate → ctx.sessionTitle.rename(childSession, renderName(nameTemplate, vars))
-      autoContinue → childAgent.followup(createUserMessage({…source:{kind:'session-escalation'}}))
-      archiveParentOnEscalate → workspaceRegistry.archiveSession(session.id, {stopActivity:true})（排在子侧全部落定之后；失败/缺席不阻断）
+      autoContinue → childAgent.followup(createUserMessage({
+        content:[{type:'text', text:'[交接] 你是第 n 次升级接棒会话。父会话：「标题」(id)…' + continuePrompt}],
+        source:{kind:'session-escalation', parentSessionId, boundarySeq:null} }))
+    inheritMode='full'（v0.4 旧行为）：
+      boundary = 最后一个 turn/end 的 seq → seed = 前缀 + end-seed 哨兵
+      体积门禁：seed 估算 tokens(Σ JSON.stringify+1, /4) ≥ T2×contextWindow
+        → 拒绝建立、消耗升级额度、warn（防"出生即超限→连环升级"复发）
+      ctx.agents.create({sessionId, seed, inheritedEventCount: boundary+1,
+                         meta:{cwd, isSeeded:true, agentPreset?}, agentOptions, setup})
+      （rename / autoContinue 同上，boundarySeq=boundary）
+    archiveParentOnEscalate → workspaceRegistry.archiveSession(session.id, {stopActivity:true})（排在子侧全部落定之后；失败/缺席不阻断）
   ratio ≥ T1 (0.70) 且压缩额度未耗尽 → ctx.compaction.compactNow(agent)（busy 不计数、下轮重试）
   防抖：每会话压缩 ≤ 2、升级 ≤ 1、链深 ≤ 16；agent 忙 / 度量缺失 → fail-closed
 同级 = 不传 parentAgent，meta 不含 parentSession（对齐 controller）。
@@ -102,7 +119,7 @@ ratio = occupancy / contextWindow
 
 ## 配置（宿主 config 管线，`resolveConfig` 全量校验）
 
-`{ enabled, thresholdRatio1:0.70, thresholdRatio2:0.90, maxCompactPerSession:2, maxEscalatePerSession:1, maxChainDepth:16, autoContinue:true, continuePrompt:"…", renameOnEscalate:true, archiveParentOnEscalate:true, nameTemplate:"{parent}-续{n}" }`
+`{ enabled, thresholdRatio1:0.70, thresholdRatio2:0.90, maxCompactPerSession:2, maxEscalatePerSession:1, maxChainDepth:16, inheritMode:'summary', autoContinue:true, continuePrompt:"…", renameOnEscalate:true, archiveParentOnEscalate:true, nameTemplate:"{parent}-续{n}" }`
 
 - 首选入口：**GUI 插件管理页的表单**（A9）；文件级等价入口是 `cordis.patch.yml` 的 `config:`。
 - 优先级：**宿主 config（GUI 写入 / patch）逐键优先 > `DSH_ESCALATION_CONFIG` > `DEFAULTS`**；面板显示 `host+env` / `host` / `env` / `default`。
@@ -113,12 +130,12 @@ ratio = occupancy / contextWindow
 
 ## 验证计划与实绩
 
-1. 纯策略内核门禁 `test-policy.mjs`：**18/18 passed**（含命名模板 5 组）。
-2. 宿主集成门禁 `test-flow.mjs`（假 ctx + 真实事件形状）：**33/33 passed**（含 config 优先级、语义校验、volatile 热更新、命名链路 6 组、归档 4 组）。
+1. 纯策略内核门禁 `test-policy.mjs`：**19/19 passed**（含命名模板 5 组、inheritMode 枚举 v0.5 一组）。
+2. 宿主集成门禁 `test-flow.mjs`（假 ctx + 真实事件形状）：**38/38 passed**（含 config 优先级、语义校验、volatile 热更新、命名链路 6 组、归档 4 组、v0.5 六组：full seed 配方、summary 无 seed、summary 交接头、full 体积门禁、error 跳过、aborted/completed）。
 3. 客户端门禁 `test-client.mjs`：**13/13 passed**（模块 id / inject / slot key 规则 / form 三态 / 控件类型 / 字段表与 DEFAULTS 对齐）。
 4. 宿主真实管线门禁 `test-loader.mjs`：**14/14 passed**。它读取宿主真实的 `@deepseek-ai/dsh-client-modules` 客户端 bundle（夹具 `fixtures/client-modules-client.js`，由 `tools/extract-host-client.mjs` 从宿主 app.asar 提取；`DSH_APP_ASAR` / `DSH_HOST_CLIENT_MODULES` 可覆盖），在 `node:vm` 里建门面（同时兼容旧版 `window.__ModuleLoader__` 与宿主新版裸全局 `_ModuleLoader__`），再用**宿主的 `createClientModuleSystem`** 走完整链路：注册 factory → transport 触发 → `system.import()` → 拿到 `exports` → `apply(ctx)` → `ctx.slots.inject('plugins.row.config')` → 组件渲染。断言覆盖：模块 ID、`inject=['slots']`、注册 name/key（`@zjjlivingfree/dsh-session-escalation#session-escalation`）、summary 视图、无 form 降级、ready 时表单与 `revision=7`。
    - 这是**真管线不是桩**：宿主升级若改 `__DSH_BOOT__` wire 格式或 `__ModuleLoader__` 契约，本门禁会先红。
-5. 四套门禁变异自检：策略门禁删 `unknown.length > 0` 判据 → exit 1（17/18）；流程门禁删 `if (cfg.renameOnEscalate)` → exit 1（26/27）；客户端门禁把 key 改成裸 `ROW_ID` → exit 1（12/13）；真实管线门禁同样把 key 改成裸 `ROW_ID` → exit 1（13/14，`FAIL 注册 key = <包名>#<行id> :: got session-escalation`）。四处恢复后均 exit 0。v0.4.1 归档另有 3 路定向变异（`tools/mutate-archive.mjs`）：`stopActivity: true`→false → `FAIL 归档: 默认开启`；去掉 `if (cfg.archiveParentOnEscalate)` 守卫 → `FAIL 归档: archiveParentOnEscalate=false`；client 槽位 key 改裸 `ROW_ID` → `FAIL 注册 key`。三路全真红后字节级还原，clean 复跑 exit 0。
+5. 四套门禁变异自检：策略门禁删 `unknown.length > 0` 判据 → exit 1；流程门禁删 `if (cfg.renameOnEscalate)` → exit 1；客户端门禁把 key 改成裸 `ROW_ID` → exit 1；真实管线门禁同样把 key 改成裸 `ROW_ID` → exit 1（`FAIL 注册 key = <包名>#<行id> :: got session-escalation`）。恢复后均 exit 0。定向变异套件 `tools/mutate-archive.mjs` v0.5 扩到 5 路：`stopActivity: true`→false → `FAIL 归档: 默认开启`；去掉 `if (cfg.archiveParentOnEscalate)` 守卫 → `FAIL 归档: archiveParentOnEscalate=false`；client 槽位 key 改裸 `ROW_ID` → `FAIL 注册 key`；**summary 守卫移除**（`...(summary ? {} : { seed, inheritedEventCount })` 改回无条件传）→ `FAIL v0.5 summary: L2 升级不传 seed`；**completed-only 守卫移除** → `FAIL v0.5 仅 completed turn 评估: reason=error 跳过`。五路全真红后字节级还原，clean 复跑 exit 0。
    - ⚠ 客户端变异首版是**假红**：`node -e` 里的反引号被 shell 吞掉导致语法错误退出 1，不是门禁抓到。改用 `mut-client.cjs`（读原文 → 写变异 → execSync 跑门禁 → 还原并校验字节）后才是真红。
    - ⚠ `test-loader.mjs` 夹具曾有 2 个夹具缺口（非应用缺陷）：`registrationTarget.mode` 必须是 `"queue"` 且**必须与 `sandbox.window.__ModuleLoader__` 是同一对象**（否则 bundle 注册到别处 → `loaded without registering`）；bootstrap 自身以"已物化 exports"传入时其自注册要从 pendingQueue 排除（否则 `duplicate factory registration`）。三处修好后才真绿。
 6. 真机冒烟：v0.2 已验 fiber `active`（补 `inject=['commands','agents','sessionProjections']` 后）；v0.4 已验 fiber `active`（`plugin_manager list_plugins` → `include:session-escalation` / `@zjjlivingfree/dsh-session-escalation` / `fiberPhase:"active"`，total 280）。**GUI 视觉确认仍未做**：宿主 401 鉴权 + `windows_desktop` 无桌面能力，无法自动截图。
@@ -136,3 +153,4 @@ ratio = occupancy / contextWindow
 - G9 GUI 表单在真实宿主的渲染 —— **离线部分闭合**：`test-loader.mjs` 用宿主真实 `ClientModuleSystem` 走完整管线并渲染出表单节点（14/14）；**像素级 DOM 落盘未验**（需真实浏览器）
 - G10 `configForms` 服务的 compose 时机 —— **未验**（若插件行尚未 compose，`formFor` 返回 undefined → 组件显示"未暴露可编辑配置"，属宿主时序，非插件缺陷，但需真机确认默认路径能拿到 form）
 - G11 归档真机效果 —— **未验**（代码与门禁 4 组已备：需真实触发一次 L2 升级后确认归档区出现旧会话、面板「归档引擎: 就绪」、子会话正常续作；`stopActivity` 取消运行中 turn 的实际体感需真机观察）
+- G12 连环升级根因 —— **机制层已闭合（v0.5）**：summary 默认 + completed-only 评估 + full 体积门禁，门禁 6 组 + 变异 2 路覆盖；**真机复验未做**（需启用 v0.5 后观察一个高压会话：升级一次、子会话干净、无连环 fork；此前 quick-notes 工作区已堆积的 9 个 seeded 兄弟会话属事故遗留，处置归用户）

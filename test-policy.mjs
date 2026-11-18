@@ -25,6 +25,13 @@ test('config: bad ratios throw', () => {
   assert.throws(() => resolveConfig({ maxCompactPerSession: -1 }), /maxCompactPerSession/)
   assert.throws(() => resolveConfig({ maxCompactPerSession: 1.5 }), /maxCompactPerSession/)
 })
+test('config: inheritMode enum (v0.5)', () => {
+  assert.equal(cfg.inheritMode, 'summary', '默认 = summary（干净新会话+交接）')
+  assert.equal(resolveConfig({ inheritMode: 'full' }).inheritMode, 'full')
+  assert.throws(() => resolveConfig({ inheritMode: 'clone' }), /inheritMode/)
+  assert.throws(() => resolveConfig({ inheritMode: '' }), /inheritMode/)
+  assert.throws(() => resolveConfig({ inheritMode: null }), /inheritMode/)
+})
 
 // ---- decide: 边界表（ratio 恰在阈值上/下） ----
 const obs = (o) => ({ occupancy: null, contextWindow: null, compactionsDone: 0, escalationsDone: 0, chainDepth: 0, agentIdle: true, ...o })

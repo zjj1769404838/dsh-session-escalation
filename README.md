@@ -4,12 +4,12 @@ DSH 两级阈值会话治理插件（本地开发，`link:` 挂载于 desktop pr
 
 ## 行为
 
-每个会话的每个 turn 结束后，读取 token-meter `contextPressure` 投影度量占用比：
+每个会话的每个**正常完成**（`turn/end` 且 `reason.kind==='completed'`，缺失视为 completed）的 turn 结束后，读取 token-meter `contextPressure` 投影度量占用比；error / aborted 结束的 turn 一律不评估（v0.5，防 provider 抖动引发连环升级）：
 
 | 级别 | 默认阈值 | 动作 |
 | --- | --- | --- |
 | L1 | ≥ 70% | `ctx.compaction.compactNow(agent)` 自动压缩（额度 2 次） |
-| L2 | ≥ 90%，或压缩额度耗尽仍 ≥ L1 | 在最后一个已完成 turn 处 fork **同级新会话**，继承全部历史事件（seed 配方对齐宿主 controller），分支会话获得完整额度，链深 ≤ 16；`autoContinue=true`（默认）时自动向分支投递一条续作 user 消息，驱动新会话接着干；`renameOnEscalate=true`（默认）时按 `nameTemplate` 给分支命名；`archiveParentOnEscalate=true`（默认）时升级成功后把**旧会话归档**（宿主原生 `workspaceRegistry.archiveSession`，可从归档区恢复；会取消置顶） |
+| L2 | ≥ 90%，或压缩额度耗尽仍 ≥ L1 | 升级（v0.5 默认 `inheritMode='summary'`）：**新建一个干净的同级会话**（不继承任何历史事件），并向其投递一条**交接消息**（`[交接]` 头：父标题 / 父 id / 交接时间 / 第 n 次升级 + `continuePrompt` 正文），驱动新会话接着干；分支会话获得完整额度，链深 ≤ 16；`renameOnEscalate=true`（默认）时按 `nameTemplate` 给分支命名；`archiveParentOnEscalate=true`（默认）时升级成功后把**旧会话归档**（宿主原生 `workspaceRegistry.archiveSession`，可从归档区恢复；会取消置顶）。`inheritMode='full'` 保留 v0.4 的整段继承（seed 配方对齐宿主 controller），但带体积门禁：继承前缀估算 ≥ L2 阈值即拒绝并消耗额度 |
 
 无 compaction 引擎（如 billion-context gate 禁用了宿主压缩）时：L1 直接转入升级路径。
 度量不可得、agent 忙、subagent 会话：fail-closed，零动作。
@@ -18,7 +18,7 @@ DSH 两级阈值会话治理插件（本地开发，`link:` 挂载于 desktop pr
 
 **首选入口：DSH 插件管理页 → 本插件那一行 → 配置页。** 表单由 `lib/client.js` 注册到 `plugins.row.config` 槽位，宿主把该行的配置表单（`{state, mutate}`）直接交给组件，所以不需要自建 HTTP bridge，也不经过设置页。
 
-11 个字段全部声明为 schemastery `.volatile()`，**保存后立即生效，不需要重载插件**（gui 写入走 `_commitVolatile` → 就地更新引用；插件读配置用的是每次访问都解引用的 getter 视图）。
+12 个字段全部声明为 schemastery `.volatile()`，**保存后立即生效，不需要重载插件**（gui 写入走 `_commitVolatile` → 就地更新引用；插件读配置用的是每次访问都解引用的 getter 视图）。
 
 `Config` 是真 schemastery schema（经 `createRequire(<profile>/package.json)` 解析宿主依赖——插件目录是 junction，静态 import 会被 realpath 解析回 `D:\my-projects\...` 而找不到包）。在它之上挂了一层语义校验：类型/区间由 schemastery 负责，**跨字段约束与命名模板占位符由 `withSemanticValidation` 负责**，两类错误都会在保存时被宿主拒绝（不然 GUI 能存下"一保存就把插件停用"的配置）。
 
@@ -44,6 +44,7 @@ DSH 两级阈值会话治理插件（本地开发，`link:` 挂载于 desktop pr
 | `maxCompactPerSession` | `2` | 每会话压缩额度 |
 | `maxEscalatePerSession` | `1` | 每会话升级额度 |
 | `maxChainDepth` | `16` | 分支链最大深度 |
+| `inheritMode` | `'summary'` | 升级继承模式（v0.5）：`summary`=干净新会话+交接消息；`full`=整段继承（带体积门禁） |
 | `autoContinue` | `true` | 升级后自动投递续作消息 |
 | `continuePrompt` | 见 `DEFAULTS` | 续作消息正文 |
 | `renameOnEscalate` | `true` | 升级后给分支改名 |
@@ -87,14 +88,14 @@ DSH 两级阈值会话治理插件（本地开发，`link:` 挂载于 desktop pr
 ## 门禁
 
 ```
-node test-policy.mjs   # 18/18 · 纯策略全分支 + 边界 + 命名模板 + fail-closed
-node test-flow.mjs     # 33/33 · 假 ctx + 真实事件形状（seed 配方逐字段断言、config 优先级、语义校验、volatile 热更新、命名链路、归档 4 组）
+node test-policy.mjs   # 19/19 · 纯策略全分支 + 边界 + 命名模板 + inheritMode 枚举 + fail-closed
+node test-flow.mjs     # 38/38 · 假 ctx + 真实事件形状（full seed 配方、summary 无 seed+交接头、体积门禁、completed-only 守卫、config 优先级、语义校验、volatile 热更新、命名链路、归档 4 组）
 node test-client.mjs   # 13/13 · 客户端半边：模块 id / inject / slot key 规则 / 三种 form 状态 / 字段控件类型 / 字段表与 DEFAULTS 对齐
 node test-loader.mjs   # 14/14 · 用宿主真实 client-modules bundle 承载本插件 client.js（真管线，不是桩；夹具由 tools/extract-host-client.mjs 生成）
-node tools/verify-sync.mjs  # 四源一致性校验（版本/11 字段/门禁数字/夹具路径）+ 四套门禁全跑 + 变异套件复跑，exit 0 才算交付
+node tools/verify-sync.mjs  # 四源一致性校验（版本/12 字段/继承模式/门禁数字/夹具路径）+ 四套门禁全跑 + 变异套件复跑，exit 0 才算交付
 ```
 
 `test-loader.mjs` 读取宿主真实的 `@deepseek-ai/dsh-client-modules` 客户端 bundle（夹具落 `fixtures/client-modules-client.js`，由 `tools/extract-host-client.mjs` 从宿主 app.asar 提取；`DSH_APP_ASAR` / `DSH_HOST_CLIENT_MODULES` 可覆盖），在 `node:vm` 里建门面（同时暴露旧版 `window.__ModuleLoader__` 与宿主新版裸全局 `_ModuleLoader__`），然后用**宿主的 `createClientModuleSystem`** 加载本插件，断言链路每一环。宿主升级若改了 wire 格式，这套门禁会先红。
 
-四套门禁均做过变异自检（改坏 → exit 1 → 字节级恢复 → exit 0）；v0.4.1 归档另有 3 路定向变异（`tools/mutate-archive.mjs`：stopActivity 漂移、守卫移除、client 槽位 key 降级），全真红后还原。
+四套门禁均做过变异自检（改坏 → exit 1 → 字节级恢复 → exit 0）；v0.4.1 归档另有 3 路定向变异，v0.5 新增 2 路（summary 漏传 seed 守卫移除、completed-only 守卫移除），共 5 路（`tools/mutate-archive.mjs`），全真红后还原。
 契约与源码行号证据见 `CONTRACT.md`。

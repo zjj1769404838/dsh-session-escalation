@@ -116,7 +116,7 @@ if (mine) {
     state: { status: 'ready', writable: true, revision: 7, value: {
       enabled: true, thresholdRatio1: 0.7, thresholdRatio2: 0.9,
       maxCompactPerSession: 2, maxEscalatePerSession: 1, maxChainDepth: 16,
-      autoContinue: true, renameOnEscalate: true,
+      inheritMode: 'summary', autoContinue: true, renameOnEscalate: true,
       nameTemplate: '{parent}-续{n}', continuePrompt: '继续',
     } },
     mutate: async () => true,
